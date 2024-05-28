@@ -1,48 +1,55 @@
 import streamlit as st
 import numpy as np
-from PIL import Image
-import tensorflow as tf
-from sklearn.metrics import jaccard_score
+import torch
+import segmentation_models_pytorch as smp
 import nibabel as nib
 import tempfile
 import os
 import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
 
 
+# Определение модели
+n_cls = 2  # Количество классов для сегментации: 0 - фон, 1 - печень
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Загрузка модели
+def load_model():
+    model = smp.DeepLabV3Plus(classes=n_cls, in_channels=1)
+    model.load_state_dict(torch.load('model.pth', map_location=device))
+    model.to(device)
+    model.eval()
+    return model
+
+model = load_model()
+
+# Чтение Nifti файла
 def read_nii(filepath):
     scan = nib.load(filepath)
     scan = scan.get_fdata()
     return scan
 
 
-@st.cache_resource
-def load_model():
-    return tf.keras.models.load_model("model.h5")
-
-
-model = load_model()
-
-
+# Предобработка изображения
 def preprocess_image(image):
     image = Image.fromarray(image)
-    image = image.resize((128, 128))
+    image = image.resize((256, 256))
     image = np.array(image)
 
     if image.ndim == 2:
-        image = np.stack([image] * 3, axis=-1)
+        image = np.expand_dims(image, axis=-1)
 
     image = image / 255.0
-    image = image[np.newaxis, ...]
+    image = np.transpose(image, (2, 0, 1))
+    image = torch.tensor(image, dtype=torch.float32)
+    image = image.unsqueeze(0)
     return image
 
 
-def calculate_jaccard(y_true, y_pred):
-    y_pred_binary = (y_pred > 0.5).astype(int)
-    return jaccard_score(y_true.flatten(), y_pred_binary.flatten(), average='macro')
-
-
-def display_results(image, y_pred, y_true=None):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+# Отображение результатов
+def display_results(image, y_pred):
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
     axes[0].imshow(image, cmap='gray')
     axes[0].set_title("Original Image")
@@ -51,11 +58,6 @@ def display_results(image, y_pred, y_true=None):
     axes[1].imshow(y_pred.squeeze(), cmap='gray')
     axes[1].set_title("Predicted Mask")
     axes[1].axis('off')
-
-    if y_true is not None:
-        axes[2].imshow(y_true.squeeze(), cmap='gray')
-        axes[2].set_title("True Mask")
-        axes[2].axis('off')
 
     st.pyplot(fig)
 
@@ -71,17 +73,69 @@ if uploaded_file is not None:
 
     image = read_nii(temp_filename)
 
-    first_slice = image[:, :, image.shape[2] // 2]
+    # Добавляем ползунок для выбора слайса
+    selected_slice = st.slider("Выберите слайс", 0, image.shape[2] - 1, image.shape[2] // 2)
 
-    preprocessed_image = preprocess_image(first_slice)
+    selected_slice_image = image[:, :, selected_slice]
+    preprocessed_image = preprocess_image(selected_slice_image).to(device)
 
-    y_pred = model.predict(preprocessed_image)
+    with torch.no_grad():
+        y_pred = model(preprocessed_image)
+    y_pred = torch.argmax(y_pred, dim=1).cpu().numpy()
 
-    y_true = np.random.randint(0, 2, size=y_pred.shape)
-
-    jaccard = calculate_jaccard(y_true, y_pred)
-    st.write(f"Jaccard Index: {jaccard:.4f}")
-
-    display_results(first_slice, y_pred, y_true)
+    display_results(selected_slice_image, y_pred)
 
     os.remove(temp_filename)
+
+# Добавляем форму для загрузки файла маски
+st.subheader("Загрузите правильную маску")
+ground_truth_mask = st.file_uploader("Загрузите файл маски", type=["nii"])
+
+if ground_truth_mask is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".nii") as mask_temp_file:
+        mask_temp_file.write(ground_truth_mask.getbuffer())
+        mask_temp_filename = mask_temp_file.name
+
+    gt_image = read_nii(mask_temp_filename)
+
+    # Вычисляем индекс Жаккара
+    jaccard_indices = []
+    for i in range(image.shape[2]):
+        selected_slice_image = image[:, :, i]
+        preprocessed_image = preprocess_image(selected_slice_image).to(device)
+
+        with torch.no_grad():
+            y_pred = model(preprocessed_image)
+        y_pred = torch.argmax(y_pred, dim=1).cpu().numpy()
+
+        gt_slice = gt_image[:, :, i]
+        pred_mask = y_pred.squeeze()
+
+        # Изменить размер маски истинных значений, чтобы соответствовать размерам предсказанной маски
+        gt_slice_resized = cv2.resize(gt_slice, (256, 256), interpolation=cv2.INTER_NEAREST)
+        intersection = np.logical_and(gt_slice_resized, pred_mask).sum()
+        union = np.logical_or(gt_slice_resized, pred_mask).sum()
+
+        # Обработка деления на ноль
+        if union == 0:
+            jaccard_index = 0.0  # Задаем нулевое значение индекса Жаккара в случае деления на ноль
+        else:
+            jaccard_index = intersection / union
+
+        jaccard_indices.append(jaccard_index)
+
+    # Вычисляем средний индекс Жаккара
+    average_jaccard_index = np.nanmean(jaccard_indices)
+    st.write(f"Индекс Жаккара: {round(average_jaccard_index, 4)}")
+
+    try:
+        mask_temp_file.close()
+    except Exception as e:
+        print("Ошибка при попытке закрыть файл:", e)
+
+    # Удаление файла
+    try:
+        os.remove(mask_temp_filename)
+    except Exception as e:
+        print("Ошибка при удалении файла:", e)
+
