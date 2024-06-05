@@ -9,20 +9,22 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import cv2
 
-
 # Определение модели
 n_cls = 2  # Количество классов для сегментации: 0 - фон, 1 - печень
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 # Загрузка модели
 def load_model():
     model = smp.DeepLabV3Plus(classes=n_cls, in_channels=1)
     model.load_state_dict(torch.load('model.pth', map_location=device))
-    model.to(device)
+    # model.to(device)
     model.eval()
     return model
 
+
 model = load_model()
+
 
 # Чтение Nifti файла
 def read_nii(filepath):
@@ -138,4 +140,3 @@ if ground_truth_mask is not None:
         os.remove(mask_temp_filename)
     except Exception as e:
         print("Ошибка при удалении файла:", e)
-
