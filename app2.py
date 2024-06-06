@@ -35,7 +35,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Загрузка модели
 def load_model():
     model = smp.DeepLabV3Plus(classes=n_cls, in_channels=1)
-    model.load_state_dict(torch.load('model4.pth', map_location=device))
+    model.load_state_dict(torch.load('final_model.pth', map_location=device))
     model.to(device)
     model.eval()
     print("Модель загружена и установлена в режим eval")
@@ -46,26 +46,19 @@ model = load_model()
 
 
 # Отображение результатов
-def display_results(image, y_pred, ground_truth=None):
-    if ground_truth is not None:
-        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-    else:
-        fig, axes = plt.subplots(1, 2, figsize=(20, 5))
+def display_results(image, y_pred):
+    fig, axes = plt.subplots(1, 2, figsize=(20, 5))
 
     image = image.squeeze().squeeze()
+    y_pred = y_pred.squeeze()
 
     axes[0].imshow(image, cmap='gray')
     axes[0].set_title("Original Image")
     axes[0].axis('off')
 
-    axes[1].imshow(y_pred.squeeze(), cmap='gray')
+    axes[1].imshow(y_pred, cmap='gray')
     axes[1].set_title("Predicted Mask")
     axes[1].axis('off')
-
-    if ground_truth is not None:
-        axes[2].imshow(ground_truth, cmap='gray')
-        axes[2].set_title("Ground Truth Mask")
-        axes[2].axis('off')
 
     st.pyplot(fig)
 
@@ -82,11 +75,11 @@ if uploaded_file is not None:
     image = read_nii(temp_filename)
     image = preprocess_im(image)
     image = apply_transformations(image)
-    # Добавляем ползунок для выбора слайса
 
     with torch.no_grad():
         y_pred = model(image)
-    y_pred = torch.argmax(y_pred, dim=1).cpu().numpy()
+    # y_pred = torch.argmax(y_pred, dim=1).cpu().numpy()
+    y_pred = torch.sigmoid(y_pred) > 0.5
 
     display_results(image, y_pred)
 
